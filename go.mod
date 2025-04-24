@@ -1,4 +1,4 @@
-module jurocksdb
+module github.com/jsuserapp/jurocksdb
 
 go 1.24.2
 
