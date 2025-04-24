@@ -1,4 +1,4 @@
-package rocksdb
+package jurocksdb
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/deps/include
@@ -14,7 +14,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"jurocksdb/ju"
+	"github.com/jsuserapp/ju"
 	"sync"
 	"unsafe"
 )

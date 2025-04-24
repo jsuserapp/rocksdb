@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	"jurocksdb/ju"
-	"jurocksdb/rocksdb"
+	"github.com/jsuserapp/ju"
+	"jurocksdb"
 	"sync"
 	"time"
 )
@@ -68,7 +68,7 @@ func testRocks() {
 	multiGet(cf)
 	span.LogGreen("multiget")
 }
-func putItems(cf *rocksdb.ColumnFamily) {
+func putItems(cf *jurocksdb.ColumnFamily) {
 	n := 200
 	start := 199
 	end := start + n
@@ -87,7 +87,7 @@ func putItems(cf *rocksdb.ColumnFamily) {
 		ju.LogRed(err)
 	}
 }
-func deleteItems(cf *rocksdb.ColumnFamily) {
+func deleteItems(cf *jurocksdb.ColumnFamily) {
 	n := 200
 	start := 199
 	end := start + n
@@ -102,7 +102,7 @@ func deleteItems(cf *rocksdb.ColumnFamily) {
 		ju.LogRed(err)
 	}
 }
-func multiGet(cf *rocksdb.ColumnFamily) {
+func multiGet(cf *jurocksdb.ColumnFamily) {
 	n := 200
 	start := 199
 	end := start + n
@@ -119,7 +119,7 @@ func multiGet(cf *rocksdb.ColumnFamily) {
 		ju.LogRed(err)
 	}
 }
-func listItems(cf *rocksdb.ColumnFamily) {
+func listItems(cf *jurocksdb.ColumnFamily) {
 	cf.ListPrefix([]byte("2"), func(key, val []byte) bool {
 		ju.LogGreen(string(key), "=", string(val))
 		//err := cf.Delete(key)
@@ -129,7 +129,7 @@ func listItems(cf *rocksdb.ColumnFamily) {
 		return true
 	})
 }
-func asynWriteRead(cf *rocksdb.ColumnFamily) {
+func asynWriteRead(cf *jurocksdb.ColumnFamily) {
 	var wg sync.WaitGroup
 	n := 500
 	for i := 0; i < n; i++ {
@@ -164,9 +164,9 @@ func asynWriteRead(cf *rocksdb.ColumnFamily) {
 	}
 	wg.Wait()
 }
-func openCf() *rocksdb.RocksCf {
-	options := rocksdb.GetDefaultOptions()
-	db, err := rocksdb.OpenCf("testdb", options, nil)
+func openCf() *jurocksdb.RocksCf {
+	options := jurocksdb.GetDefaultOptions()
+	db, err := jurocksdb.OpenCf("testdb", options, nil)
 	if err != nil {
 		ju.LogRed(err.Error())
 		return nil
@@ -174,9 +174,9 @@ func openCf() *rocksdb.RocksCf {
 	return db
 }
 func deleteCf() {
-	options := rocksdb.GetDefaultOptions()
+	options := jurocksdb.GetDefaultOptions()
 	cfNames := []string{"tab1"}
-	dbcf, err := rocksdb.OpenCf("testdb", options, cfNames)
+	dbcf, err := jurocksdb.OpenCf("testdb", options, cfNames)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
@@ -207,9 +207,9 @@ func deleteCf() {
 	fmt.Println("value", string(val))
 }
 func addCf() {
-	options := rocksdb.GetDefaultOptions()
+	options := jurocksdb.GetDefaultOptions()
 	cfNames := []string{"tab3"}
-	dbcf, err := rocksdb.OpenCf("testdb", options, cfNames)
+	dbcf, err := jurocksdb.OpenCf("testdb", options, cfNames)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
@@ -234,8 +234,8 @@ func addCf() {
 	fmt.Println("value", string(val))
 }
 func SomeTest() {
-	options := rocksdb.GetDefaultOptions()
-	db, err := rocksdb.Open("testdb", options)
+	options := jurocksdb.GetDefaultOptions()
+	db, err := jurocksdb.Open("testdb", options)
 	if err != nil {
 		fmt.Println(err.Error())
 		return

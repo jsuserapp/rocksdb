@@ -1,4 +1,4 @@
-package rocksdb
+package jurocksdb
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/deps/include

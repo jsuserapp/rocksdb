@@ -1,5 +1,5 @@
 /*
-Package rocksdb
+Package jurocksdb
 不同的平台需要安装对应的库，参考这个官方文档：https://github.com/facebook/rocksdb/blob/main/INSTALL.md
 Windows 平台使用 msys2 mingw64 编译，代码中的库是针对这个编译器。
 
@@ -19,6 +19,6 @@ Build Date:2025-01-09 20:13:21
 
 Linux平台使用的 librocks.a 是从使用最新的 v10.0.1(03/05/2025) 编译的
 */
-package rocksdb
+package jurocksdb
 
 import "C"
