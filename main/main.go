@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"github.com/jsuserapp/ju"
-	"jurocksdb"
+	"github.com/jsuserapp/jurocksdb"
 	"sync"
 	"time"
 )
