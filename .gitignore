@@ -8,8 +8,6 @@
 *.so
 *.dylib
 
-rocksdb
-
 # Test binary, built with `go test -c`
 *.test
 
