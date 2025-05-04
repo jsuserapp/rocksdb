@@ -8,7 +8,7 @@
 *.so
 *.dylib
 
-jurocksdb
+rocksdb
 
 # Test binary, built with `go test -c`
 *.test
@@ -28,4 +28,4 @@ go.work.sum
 
 .idea/
 
-testdb/
+tmp/

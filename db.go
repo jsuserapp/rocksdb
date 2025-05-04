@@ -1,4 +1,4 @@
-package jurocksdb
+package rocksdb
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/deps/include
@@ -11,430 +11,245 @@ package jurocksdb
 */
 import "C"
 import (
-	"bytes"
 	"errors"
+	"github.com/jsuserapp/ju"
+	"sync"
 	"unsafe"
 )
 
-var errKeyIsNil = errors.New("key Cann't be nil")
-var errProcIsNil = errors.New("call back function can not be nil")
-var errHandleIsNil = errors.New("handle is nil, it has closed or not inited")
-
-var _gEmpty [1]byte
-var gNullPtr = (*C.char)(unsafe.Pointer(&_gEmpty[0]))
-
-func toCBytes(data []byte) (*C.char, C.size_t) {
-	if len(data) > 0 {
-		return (*C.char)(unsafe.Pointer(&data[0])), C.size_t(len(data))
-	}
-	return gNullPtr, 0
-}
-func charErr(err *C.char) error {
-	if err == nil {
-		return nil
-	}
-	errStr := C.GoString(err)
-	C.free(unsafe.Pointer(err))
-	return errors.New(errStr)
-}
-
-// Options 定义 RocksDB 的数据库打开选项
-type Options struct {
-	// CreateIfMissing 如果数据库不存在，是否创建新数据库
-	// 默认值: true
-	// 设为 false 时，若数据库不存在，打开会失败
-	CreateIfMissing bool
-
-	// IncreaseParallelism 增加后台线程的并行度，提升压缩和刷写性能
-	// 默认值: 0
-	// 通常设置为 CPU 核心数或稍低值，0 表示不调整
-	IncreaseParallelism int
-
-	// ErrorIfExists 如果数据库已存在，是否报错
-	// 默认值: false
-	// 设为 true 时，若数据库已存在，打开会失败
-	ErrorIfExists bool
-
-	// WriteBufferSize MemTable 的大小（字节），影响内存使用和写性能
-	// 默认值: 0
-	// 增大可减少刷盘频率，但占用更多内存
-	WriteBufferSize int
-
-	// MaxOpenFiles 最大打开文件数，影响文件句柄使用
-	// 默认值: 0
-	// 设为 -1 表示无限制，小值可能导致性能下降
-	MaxOpenFiles int
-
-	// DisableWAL 是否禁用 Write-Ahead Log（WAL）
-	// 默认值: false
-	// 设为 true 时，数据仅存内存，程序退出后丢失，适合临时数据库
-	DisableWAL bool
-
-	// CompressionType 数据压缩类型，影响存储空间和读写性能
-	// 默认值: "snappy" (支持: "none", "snappy", "zlib", "bzip2", "lz4", "zstd")
-	// "none" 表示无压缩，"snappy" 平衡速度和压缩率
-	CompressionType string
-
-	// TargetFileSizeBase 每个 SST 文件的目标大小（字节）
-	// 默认值: 0
-	// 影响压缩和读取性能，小值增加文件数，大值减少文件数
-	TargetFileSizeBase int
-
-	// MaxBackgroundJobs 后台任务（如压缩、刷盘）的最大线程数
-	// 默认值: 0
-	// 增大可提升后台处理速度，但消耗更多 CPU
-	MaxBackgroundJobs int
-
-	// AllowConcurrentMemtableWrite 是否允许多线程并发写入 MemTable
-	// 默认值: false (RocksDB 6.7+ 支持)
-	// 设为 true 可提升多线程写性能
-	AllowConcurrentMemtableWrite bool
-}
-
-// GetDefaultOptions 返回默认的 RocksDB 选项
-func GetDefaultOptions() *Options {
-	return &Options{
-		CreateIfMissing:              true, // 如果数据库不存在，自动创建
-		IncreaseParallelism:          0,
-		ErrorIfExists:                false, // 允许覆盖现有数据库
-		WriteBufferSize:              0,
-		MaxOpenFiles:                 0,
-		DisableWAL:                   false,    // 默认启用 WAL
-		CompressionType:              "snappy", // 使用 Snappy 压缩
-		TargetFileSizeBase:           0,
-		MaxBackgroundJobs:            0,     // 后台任务线程
-		AllowConcurrentMemtableWrite: false, // 默认禁用并发 MemTable 写
-	}
-}
-
-// ApplyOptions 将 Go 的 Options 应用到 RocksDB 的 C 选项
-func applyOptions(opts *C.rocksdb_options_t, options *Options) {
-	C.rocksdb_options_set_create_if_missing(opts, C.uchar(boolToInt(options.CreateIfMissing)))
-	if options.IncreaseParallelism != 0 {
-		C.rocksdb_options_increase_parallelism(opts, C.int(options.IncreaseParallelism))
-	}
-	C.rocksdb_options_set_error_if_exists(opts, C.uchar(boolToInt(options.ErrorIfExists)))
-	if options.WriteBufferSize != 0 {
-		C.rocksdb_options_set_write_buffer_size(opts, C.size_t(options.WriteBufferSize))
-	}
-	if options.MaxOpenFiles != 0 {
-		C.rocksdb_options_set_max_open_files(opts, C.int(options.MaxOpenFiles))
-	}
-
-	switch options.CompressionType {
-	case "none":
-		C.rocksdb_options_set_compression(opts, C.rocksdb_no_compression)
-	case "snappy":
-		C.rocksdb_options_set_compression(opts, C.rocksdb_snappy_compression)
-	case "zlib":
-		C.rocksdb_options_set_compression(opts, C.rocksdb_zlib_compression)
-	case "bzip2":
-		C.rocksdb_options_set_compression(opts, C.rocksdb_bz2_compression)
-	case "lz4":
-		C.rocksdb_options_set_compression(opts, C.rocksdb_lz4_compression)
-	case "zstd":
-		C.rocksdb_options_set_compression(opts, C.rocksdb_zstd_compression)
-	default:
-		C.rocksdb_options_set_compression(opts, C.rocksdb_snappy_compression) // 默认 Snappy
-	}
-
-	if options.TargetFileSizeBase != 0 {
-		C.rocksdb_options_set_target_file_size_base(opts, C.uint64_t(options.TargetFileSizeBase))
-	}
-	if options.MaxBackgroundJobs != 0 {
-		C.rocksdb_options_set_max_background_jobs(opts, C.int(options.MaxBackgroundJobs))
-	}
-	C.rocksdb_options_set_allow_concurrent_memtable_write(opts, C.uchar(boolToInt(options.AllowConcurrentMemtableWrite)))
-}
-
-// boolToInt 将 Go 的 bool 转换为 C 的 int
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
-type RocksDb struct {
+type dbType struct {
 	db *C.rocksdb_t
 	wo *C.rocksdb_writeoptions_t
 	ro *C.rocksdb_readoptions_t
 }
 
-func Open(path string, options *Options) (*RocksDb, error) {
-	db := &RocksDb{}
-	if options == nil {
-		options = GetDefaultOptions()
+var errKeyIsNil = errors.New("key Can't be nil")
+var errProcIsNil = errors.New("call back function cannot be nil")
+var errHandleIsNil = errors.New("handle is nil, it has closed or not inited")
+
+// SetErrLang rocksdb 返回的错误字符串编码是当前运行环境的语言编码相关的，必然运行环境是中文GBK，
+// 则需要相应的转码才能正确显示内容。鉴于语言编码众多，用户自行设置转码操作。如果不设置这个函数，默认
+// 就按 utf-8 编码来对待，大多数因为字符可以正确显示，但是如果当前平台编码不是 utf-8，则可能乱码。
+func SetErrLang(errLangString func(err []byte) string) {
+	_errLangString = errLangString
+}
+
+type Db struct {
+	mut    sync.Mutex
+	cfList *ju.OrderMap[string, *ColumnFamily]
+}
+
+func Open(path string, opts *Options) (*Db, error) {
+	//尝试创建数据库，因为后面的操作需要数据库必须存在。
+	//如果数据库已经存在，这个操作可能会打开失败，忽略它。
+	if opts == nil {
+		opts = GetDefaultOptions()
+		defer opts.Close()
 	}
-	opts := C.rocksdb_options_create()
-	applyOptions(opts, options)
-	var err *C.char
+	tryCreateDb(path, opts)
+
+	cfs := ju.NewOrderMap[string, *ColumnFamily]()
+	dbcf := &Db{cfList: cfs}
+	//如果用户没有传入 options 使用缺省设置
+	//数据库路径，这个参数多次使用
 	dbPath := C.CString(path)
-	_db := C.rocksdb_open(opts, dbPath, &err)
-	C.free(unsafe.Pointer(dbPath))
-	C.rocksdb_options_destroy(opts)
+	defer func() {
+		C.free(unsafe.Pointer(dbPath))
+	}()
+	//获取已经存在的 column family
+	existNames, e := getExistCfNames(opts.handle, dbPath)
+	if e != nil {
+		return nil, e
+	}
+	for existName := range existNames {
+		dbcf.cfList.Set(existName, nil)
+	}
+	e = dbcf.openExistCf(opts.handle, dbPath, existNames)
+	if e != nil {
+		return nil, e
+	}
+	dbcf.initDb(opts)
+
+	return dbcf, nil
+}
+
+func (rdb *Db) GetColumnFamily(name string) *ColumnFamily {
+	rdb.mut.Lock()
+	defer rdb.mut.Unlock()
+	cf, _ := rdb.cfList.Get(name)
+	return cf
+}
+func (rdb *Db) GetDefault() *ColumnFamily {
+	rdb.mut.Lock()
+	defer rdb.mut.Unlock()
+	cf, _ := rdb.cfList.Get("default")
+	return cf
+}
+func (rdb *Db) Close() {
+	rdb.mut.Lock()
+	defer rdb.mut.Unlock()
+	for _, cf := range rdb.cfList.Values() {
+		cf.Close()
+	}
+	cf, _ := rdb.cfList.Get("default")
+	if cf != nil && cf.rocks != nil {
+		rocks := cf.rocks
+		if rocks.wo != nil {
+			C.rocksdb_writeoptions_destroy(rocks.wo)
+			rocks.wo = nil
+		}
+		if rocks.ro != nil {
+			C.rocksdb_readoptions_destroy(rocks.ro)
+			rocks.ro = nil
+		}
+		if rocks.db != nil {
+			C.rocksdb_close(rocks.db)
+			rocks.db = nil
+		}
+	}
+}
+func (rdb *Db) DeleteColumnFamily(name string) (bool, error) {
+	rdb.mut.Lock()
+	defer rdb.mut.Unlock()
+	cf, _ := rdb.cfList.Get(name)
+	if cf == nil {
+		return false, nil
+	}
+	var err *C.char
+	C.rocksdb_drop_column_family(cf.rocks.db, cf.handle, &err)
 	if err != nil {
-		return nil, charErr(err)
+		return false, charErr(err)
 	}
-	db.db = _db
-	db.wo = C.rocksdb_writeoptions_create()
-	if options.DisableWAL {
-		C.rocksdb_writeoptions_disable_WAL(db.wo, C.int(boolToInt(options.DisableWAL)))
-	}
-	db.ro = C.rocksdb_readoptions_create()
-	C.rocksdb_readoptions_set_prefix_same_as_start(db.ro, 1)
-	return db, nil
+	rdb.cfList.Delete(name)
+	cf.Close()
+	return true, nil
 }
-func (db *RocksDb) Close() {
-	if db.wo != nil {
-		C.rocksdb_writeoptions_destroy(db.wo)
-		db.wo = nil
-	}
-	if db.ro != nil {
-		C.rocksdb_readoptions_destroy(db.ro)
-		db.ro = nil
-	}
-	if db.db != nil {
-		C.rocksdb_close(db.db)
-		db.db = nil
-	}
+func (rdb *Db) ListColumnFamily() []string {
+	rdb.mut.Lock()
+	defer rdb.mut.Unlock()
+	return rdb.cfList.Keys()
 }
-func (db *RocksDb) Put(key, value []byte) error {
-	if db.db == nil {
-		return errHandleIsNil
+
+// AddColumnFamily 添加 column family，这个函数会先检测要添加的是否已经存在，如果已经存在，
+// 直接返回成功，不做任何更改
+func (rdb *Db) AddColumnFamily(addNames []string, opts *Options) bool {
+	//检测名称的有效性和去重
+	addNames = uniqNames(addNames)
+	if len(addNames) > 0 {
+		var createNames []string
+		for _, name := range addNames {
+			_, ok := rdb.cfList.Get(name)
+			if !ok {
+				createNames = append(createNames, name)
+			}
+		}
+
+		if opts == nil {
+			opts = GetDefaultOptions()
+			defer opts.Close()
+		}
+		//生成不存在的 column family
+		e := rdb.createCf(opts.handle, createNames)
+		if ju.CheckFailure(e) {
+			return false
+		}
 	}
+	return true
+}
+func (rdb *Db) openExistCf(opts *C.rocksdb_options_t, dbPath *C.char, existNames map[string]bool) error {
+	count := len(existNames)
+	names := make([]string, 0, count)
+	for cfName := range existNames {
+		names = append(names, cfName)
+	}
+	//打开 column family
+	cfNamesC := make([]*C.char, count)
+	for i, cfNameC := range names {
+		cfNamesC[i] = C.CString(cfNameC)
+	}
+	defer func() {
+		for _, cfNameC := range cfNamesC {
+			C.free(unsafe.Pointer(cfNameC))
+		}
+	}()
+	cfHandles := make([]*C.rocksdb_column_family_handle_t, count)
+
+	cfOpts := make([]*C.rocksdb_options_t, count)
+	for i := range cfOpts {
+		cfOpts[i] = C.rocksdb_options_create_copy(opts)
+	}
+
 	var err *C.char
-	cKey, keyLen := toCBytes(key)
-	cValue, valLen := toCBytes(value)
-	C.rocksdb_put(db.db, db.wo, cKey, keyLen, cValue, valLen, &err)
-	return charErr(err)
-}
-func (db *RocksDb) Get(key []byte) ([]byte, error) {
-	if db.db == nil {
-		return nil, errHandleIsNil
+	//rocksdb_t* rocksdb_open_column_families(
+	//    const rocksdb_options_t* options, const char* name, int num_column_families,
+	//    const char* const* column_family_names,
+	//    const rocksdb_options_t* const* column_family_options,
+	//    rocksdb_column_family_handle_t** column_family_handles, char** errptr);
+	handle := C.rocksdb_open_column_families(opts, dbPath, C.int(count), &cfNamesC[0], &cfOpts[0], &cfHandles[0], &err)
+	for i := range cfOpts {
+		C.rocksdb_options_destroy(cfOpts[i])
 	}
-	cKey, keyLen := toCBytes(key)
-	var err *C.char
-	var valLen C.size_t
-	value := C.rocksdb_get(db.db, db.ro, cKey, keyLen, &valLen, &err)
 	if err != nil {
-		return nil, charErr(err)
-	}
-	// 如果键不存在，value 为 nil
-	if value == nil {
-		return nil, nil
+		return charErr(err)
 	}
 
-	goValue := C.GoBytes(unsafe.Pointer(value), C.int(valLen))
-	C.free(unsafe.Pointer(value))
-
-	return goValue, nil
+	rocks := &dbType{
+		db: handle,
+	}
+	for i, name := range names {
+		rdb.cfList.Set(name, &ColumnFamily{
+			rocks:  rocks,
+			handle: cfHandles[i],
+		})
+	}
+	return nil
 }
-func (db *RocksDb) Delete(key []byte) error {
-	if db.db == nil {
-		return errHandleIsNil
+
+// createCf 数据库必须已经打开，default 必然存在
+func (rdb *Db) createCf(opts *C.rocksdb_options_t, createNames []string) error {
+	createCount := len(createNames)
+	if createCount == 0 {
+		return nil
 	}
-	cKey, keyLen := toCBytes(key)
+	createNamesC := make([]*C.char, createCount)
+	for i, createName := range createNames {
+		createNamesC[i] = C.CString(createName)
+	}
+	//一旦赋值后就需要清理
+	defer func() {
+		for _, createNameC := range createNamesC {
+			C.free(unsafe.Pointer(createNameC))
+		}
+	}()
+
+	//生成需要的 column family
 	var err *C.char
-	C.rocksdb_delete(db.db, db.wo, cKey, keyLen, &err)
-	return charErr(err)
+	var lencfs C.size_t
+
+	rocks := rdb.GetDefault().rocks
+	handleList := C.rocksdb_create_column_families(rocks.db, opts, C.int(createCount), &createNamesC[0], &lencfs, &err)
+	if err != nil {
+		return charErr(err)
+	}
+	handleArray := (*[1 << 30]*C.rocksdb_column_family_handle_t)(unsafe.Pointer(handleList))[:lencfs:lencfs]
+	handles := make([]*C.rocksdb_column_family_handle_t, lencfs)
+	copy(handles, handleArray)
+	C.free(unsafe.Pointer(handleList))
+	for i := 0; i < int(lencfs); i++ {
+		rdb.cfList.Set(createNames[i], &ColumnFamily{
+			rocks:  rocks,
+			handle: handles[i],
+		})
+	}
+	return nil
 }
-
-// PutBatch 批量写入键值对, 函数不会对keys进行查重，所以如果key有重复，会被覆盖
-func (db *RocksDb) PutBatch(keys, values [][]byte) error {
-	if db.db == nil {
-		return errHandleIsNil
+func (rdb *Db) initDb(options *Options) {
+	rocks := rdb.GetDefault().rocks
+	//所有cf共享同一个rocks
+	rocks.wo = C.rocksdb_writeoptions_create()
+	if options != nil && options.DisableWAL {
+		C.rocksdb_writeoptions_disable_WAL(rocks.wo, C.int(boolToCint(options.DisableWAL)))
 	}
-	if keys == nil || values == nil {
-		return errKeyIsNil
-	}
-	if len(keys) != len(values) {
-		return errors.New("keys and values must correspond one to one")
-	}
-	wb := C.rocksdb_writebatch_create()
-	defer C.rocksdb_writebatch_destroy(wb)
-	count := len(keys)
-	for i := 0; i < count; i++ {
-		key := keys[i]
-		value := values[i]
-		cKey, keyLen := toCBytes(key)
-		cValue, valLen := toCBytes(value)
-		C.rocksdb_writebatch_put(wb, cKey, keyLen, cValue, valLen)
-	}
-
-	var err *C.char
-	C.rocksdb_write(db.db, db.wo, wb, &err)
-	return charErr(err)
-}
-func (db *RocksDb) DeleteBatch(keys [][]byte) error {
-	if db.db == nil {
-		return errHandleIsNil
-	}
-	if keys == nil {
-		return errKeyIsNil
-	}
-	wb := C.rocksdb_writebatch_create()
-	defer C.rocksdb_writebatch_destroy(wb)
-	for _, key := range keys {
-		cKey, keyLen := toCBytes(key)
-		C.rocksdb_writebatch_delete(wb, cKey, keyLen)
-	}
-	var err *C.char
-	C.rocksdb_write(db.db, db.wo, wb, &err)
-	return charErr(err)
-}
-
-// GetMulti 批量获取多个键的值，相对于多次读取更优化, 每个 key 都不能是 nil 否则会报错.
-// 如果某个 key 不存在对应的项，则回调函数里不会包含它，也就是只返回存在的项
-func (db *RocksDb) GetMulti(keys [][]byte, cb func(key, val []byte)) error {
-	if db.db == nil {
-		return errHandleIsNil
-	}
-	if keys == nil {
-		return errKeyIsNil
-	}
-	if cb == nil {
-		return errProcIsNil
-	}
-
-	// 准备 C 数组
-	cKeys := make([]*C.char, len(keys))
-	cKeyLens := make([]C.size_t, len(keys))
-	for i, key := range keys {
-		cKeys[i], cKeyLens[i] = toCBytes(key)
-	}
-
-	values := make([]*C.char, len(keys))
-	valueLens := make([]C.size_t, len(keys))
-	errs := make([]*C.char, len(keys))
-
-	C.rocksdb_multi_get(db.db, db.ro, C.size_t(len(keys)), &cKeys[0], &cKeyLens[0], &values[0], &valueLens[0], &errs[0])
-
-	var err error
-	for i := range keys {
-		if errs[i] != nil {
-			err = charErr(errs[i])
-		}
-		if values[i] != nil {
-			val := C.GoBytes(unsafe.Pointer(values[i]), C.int(valueLens[i]))
-			C.free(unsafe.Pointer(values[i]))
-			cb(keys[i], val)
-		}
-	}
-	return err
-}
-func (db *RocksDb) DeletePrefix(prefix []byte) (int, error) {
-	if db.db == nil {
-		return 0, errHandleIsNil
-	}
-	iter := C.rocksdb_create_iterator(db.db, db.ro)
-	defer C.rocksdb_iter_destroy(iter)
-	cPrefix, pfLen := toCBytes(prefix)
-	if pfLen == 0 {
-		C.rocksdb_iter_seek_to_first(iter)
-	} else {
-		C.rocksdb_iter_seek(iter, cPrefix, pfLen)
-	}
-
-	wb := C.rocksdb_writebatch_create()
-	defer C.rocksdb_writebatch_destroy(wb)
-	// 计数删除的键
-	count := 0
-
-	// 遍历并删除匹配前缀的键
-	for C.rocksdb_iter_valid(iter) != 0 {
-		keyLen := C.size_t(0)
-		keyPtr := C.rocksdb_iter_key(iter, &keyLen)
-
-		if pfLen > 0 && (keyLen < pfLen || C.memcmp(unsafe.Pointer(keyPtr), unsafe.Pointer(cPrefix), pfLen) != 0) {
-			break
-		}
-		C.rocksdb_writebatch_delete(wb, keyPtr, keyLen)
-
-		count++
-		C.rocksdb_iter_next(iter)
-	}
-
-	var err *C.char
-	C.rocksdb_write(db.db, db.wo, wb, &err)
-	return count, charErr(err)
-}
-
-// ListPrefix 列出指定前缀的项，返回 false 终止，如何要列出全部项，传入一个长度为 0 的 prefix，但是不能是 nil，防止误操作
-func (db *RocksDb) ListPrefix(prefix []byte, cb func(key, val []byte) bool) {
-	if db.db == nil {
-		return
-	}
-	if cb == nil {
-		return
-	}
-	iter := C.rocksdb_create_iterator(db.db, db.ro)
-	defer C.rocksdb_iter_destroy(iter)
-	cPrefix, pfLen := toCBytes(prefix)
-	if pfLen == 0 {
-		C.rocksdb_iter_seek_to_first(iter)
-	} else {
-		C.rocksdb_iter_seek(iter, cPrefix, pfLen)
-	}
-
-	wb := C.rocksdb_writebatch_create()
-	defer C.rocksdb_writebatch_destroy(wb)
-
-	for C.rocksdb_iter_valid(iter) != 0 {
-		keyLen := C.size_t(0)
-		keyPtr := C.rocksdb_iter_key(iter, &keyLen)
-
-		if pfLen > 0 && (keyLen < pfLen || C.memcmp(unsafe.Pointer(keyPtr), unsafe.Pointer(cPrefix), pfLen) != 0) {
-			break
-		}
-		key := C.GoBytes(unsafe.Pointer(keyPtr), C.int(keyLen))
-		var valLen C.size_t
-		valPtr := C.rocksdb_iter_value(iter, &valLen)
-		value := C.GoBytes(unsafe.Pointer(valPtr), C.int(valLen))
-		if !cb(key, value) {
-			break
-		}
-
-		C.rocksdb_iter_next(iter)
-	}
-}
-
-// ListRange 列出指定范围的键值对, key == start, 在范围内，key == end 不在范围内
-// start 和 end 长度都为 0 时，不会返回全部条目，遍历全部键使用 ListPrefix(nil,cb)
-func (db *RocksDb) ListRange(start, end []byte, cb func(key, val []byte) bool) {
-	if db.db == nil {
-		return
-	}
-	if cb == nil {
-		return
-	}
-	iter := C.rocksdb_create_iterator(db.db, db.ro)
-	defer C.rocksdb_iter_destroy(iter)
-	cPrefix, pfLen := toCBytes(start)
-	if pfLen == 0 {
-		C.rocksdb_iter_seek_to_first(iter)
-	} else {
-		C.rocksdb_iter_seek(iter, cPrefix, pfLen)
-	}
-
-	wb := C.rocksdb_writebatch_create()
-	defer C.rocksdb_writebatch_destroy(wb)
-
-	for C.rocksdb_iter_valid(iter) != 0 {
-		keyLen := C.size_t(0)
-		keyPtr := C.rocksdb_iter_key(iter, &keyLen)
-
-		key := C.GoBytes(unsafe.Pointer(keyPtr), C.int(keyLen))
-		if bytes.Compare(key, end) >= 0 {
-			break
-		}
-		var valLen C.size_t
-		valPtr := C.rocksdb_iter_value(iter, &valLen)
-		value := C.GoBytes(unsafe.Pointer(valPtr), C.int(valLen))
-		if !cb(key, value) {
-			break
-		}
-
-		C.rocksdb_iter_next(iter)
-	}
+	rocks.ro = C.rocksdb_readoptions_create()
+	C.rocksdb_readoptions_set_prefix_same_as_start(rocks.ro, 1)
 }

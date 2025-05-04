@@ -3,7 +3,8 @@ package main
 import (
 	"fmt"
 	"github.com/jsuserapp/ju"
-	"github.com/jsuserapp/jurocksdb"
+	"github.com/jsuserapp/rocksdb"
+	"os"
 	"sync"
 	"time"
 )
@@ -11,67 +12,91 @@ import (
 //如果一个数据库使用 ColumnFamily 模式打开，且被添加多于 1 个 column family，则不能再用 RocksDb 打开
 //rocksdb 必须打开全部 column family，但是 RocksDb 模式只能打开 “default” 这种缺省模式的数据库
 
+const (
+	testDbPath = "./tmp/testdb"
+)
+
 func main() {
-	//testOrderMap()
-	testRocks()
+	//ver := rocksdb.GetVersion()
+	//ju.LogGreen(ver)
+	//setErrLang()
+	//testRocks()
+	rocksdb.TestBackup()
 }
-func testOrderMap() {
-	om := ju.NewOrderMap[string, string]()
-	om.Set("1", "a")
-	om.Set("4", "d")
-	om.Set("2", "b")
-	om.Set("3", "c")
-	om.Set("5", "e")
-	om.Set("6", "f")
-	keys := om.Keys()
-	ju.LogGreen(keys)
-	v, _ := om.Get("3")
-	ju.LogGreen(v)
-	v, _ = om.Get("7")
-	ju.LogGreen(v)
+func setErrLang() {
+	lang := os.Getenv("LANG")
+	if lang == "" {
+		lang = os.Getenv("LC_ALL")
+	}
+	if lang == "" {
+		//Windows环境，需要中文转码
+		rocksdb.SetErrLang(func(err []byte) string {
+			str, e := ju.GbkToUtf8(err)
+			if ju.CheckFailure(e) {
+				ju.LogRed(e.Error())
+			}
+			return str
+		})
+	}
+}
+
+// 打开或创建数据库，如果数据库已经存在且包含多于 1 个 column family，则会报错，
+// rocksdb要求打开时指定全部 column family。
+func createDb() {
+	options := rocksdb.GetDefaultOptions()
+	db, err := rocksdb.Open(testDbPath, options)
+	if ju.CheckFailure(err) {
+		return
+	}
+	db.Close()
 }
 func testRocks() {
 	var span ju.TimeSpan
 	span.Start()
-	db := openCf()
+	//数据库会有一个默认的 column family 名称是 “default”，这里添加另一个 “tab1”
+	db := openCf([]string{"tab1"})
 	if db == nil {
 		return
 	}
 	defer db.Close()
 	//列出所有的 cf
-	cfs := db.ListCf()
+	cfs := db.ListColumnFamily()
 	ju.LogGreen("column list:", cfs)
 	span.LogGreen("list")
 
-	cf := db.GetCf("tab1")
+	cf := db.GetColumnFamily("tab1")
 	if cf == nil {
 		return
 	}
+	//start := []byte("")
+	end := []byte("002")
+	err := cf.DeleteRange(nil, end)
+	if ju.CheckFailure(err) {
+		return
+	}
 	//读写测试
-	span.Start()
+	//span.Start()
 	//asynWriteRead(cf)
-	span.LogGreen("write read")
+	//span.LogGreen("write read")
 	//列出所有key
 	span.Start()
-	//listItems(cf)
+	listItems(cf)
 	span.LogGreen("list")
-	//删除项
-	span.Start()
-	//deleteItems(cf)
-	span.LogGreen("delete")
 	//批量添加
-	span.Start()
-	putItems(cf)
-	span.LogGreen("put batch")
+	//span.Start()
+	//putItems(cf, 100, 20)
+	//span.LogGreen("put batch")
 	//一次取出多个key对应的值
-	span.Start()
-	multiGet(cf)
-	span.LogGreen("multiget")
+	//span.Start()
+	//multiGet(cf, 100, 20)
+	//span.LogGreen("multiget")
+	//删除项
+	//span.Start()
+	//deleteItems(cf, 100, 20)
+	//span.LogGreen("delete")
 }
-func putItems(cf *jurocksdb.ColumnFamily) {
-	n := 200
-	start := 199
-	end := start + n
+func putItems(cf *rocksdb.ColumnFamily, start, count int) {
+	end := start + count
 	var keys, values [][]byte
 	for i := start; i < end; i++ {
 		ks := fmt.Sprintf("%03d", i)
@@ -87,10 +112,8 @@ func putItems(cf *jurocksdb.ColumnFamily) {
 		ju.LogRed(err)
 	}
 }
-func deleteItems(cf *jurocksdb.ColumnFamily) {
-	n := 200
-	start := 199
-	end := start + n
+func deleteItems(cf *rocksdb.ColumnFamily, start, count int) {
+	end := start + count
 	var keys [][]byte
 	for i := start; i < end; i++ {
 		ks := fmt.Sprintf("%03d", i)
@@ -102,10 +125,8 @@ func deleteItems(cf *jurocksdb.ColumnFamily) {
 		ju.LogRed(err)
 	}
 }
-func multiGet(cf *jurocksdb.ColumnFamily) {
-	n := 200
-	start := 199
-	end := start + n
+func multiGet(cf *rocksdb.ColumnFamily, start, count int) {
+	end := start + count
 	var keys [][]byte
 	for i := start; i < end; i++ {
 		ks := fmt.Sprintf("%03d", i)
@@ -113,15 +134,17 @@ func multiGet(cf *jurocksdb.ColumnFamily) {
 		keys = append(keys, k)
 	}
 	err := cf.GetMulti(keys, func(key, val []byte) {
-		ju.LogGreen(string(key), "=", string(val))
+		ju.LogGreen("Multi Get: ", string(key), "=", string(val))
 	})
 	if err != nil {
 		ju.LogRed(err)
 	}
 }
-func listItems(cf *jurocksdb.ColumnFamily) {
-	cf.ListPrefix([]byte("2"), func(key, val []byte) bool {
-		ju.LogGreen(string(key), "=", string(val))
+func listItems(cf *rocksdb.ColumnFamily) {
+	pf := make([]byte, 0)
+	cf.ListPrefix(pf, func(key, val []byte) bool {
+		ju.LogGreen("List Item:", string(key), "=", string(val))
+		//可以在这里删除项目
 		//err := cf.Delete(key)
 		//if err != nil {
 		//	ju.LogRed(err)
@@ -129,9 +152,9 @@ func listItems(cf *jurocksdb.ColumnFamily) {
 		return true
 	})
 }
-func asynWriteRead(cf *jurocksdb.ColumnFamily) {
+func asynWriteRead(cf *rocksdb.ColumnFamily) {
 	var wg sync.WaitGroup
-	n := 500
+	n := 9
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(id int) {
@@ -144,6 +167,7 @@ func asynWriteRead(cf *jurocksdb.ColumnFamily) {
 			wg.Done()
 		}(i)
 	}
+	//多读2个键，会返读取成功，但是值为 nil
 	n += 2
 	for i := 0; i < n; i++ {
 		wg.Add(1)
@@ -153,6 +177,7 @@ func asynWriteRead(cf *jurocksdb.ColumnFamily) {
 			if err != nil {
 				ju.LogRed(err.Error())
 			} else {
+				//因为是异步读写，读和写是同时进行的，所以可能出现读出来为空的情况
 				if val == nil {
 					ju.LogRed("does not exist:", key)
 				} else {
@@ -164,35 +189,35 @@ func asynWriteRead(cf *jurocksdb.ColumnFamily) {
 	}
 	wg.Wait()
 }
-func openCf() *jurocksdb.RocksCf {
-	options := jurocksdb.GetDefaultOptions()
-	db, err := jurocksdb.OpenCf("testdb", options, nil)
+func openCf(cfs []string) *rocksdb.Db {
+	options := rocksdb.GetDefaultOptions()
+	db, err := rocksdb.Open(testDbPath, options)
 	if err != nil {
 		ju.LogRed(err.Error())
 		return nil
 	}
+	db.AddColumnFamily(cfs, options)
 	return db
 }
 func deleteCf() {
-	options := jurocksdb.GetDefaultOptions()
-	cfNames := []string{"tab1"}
-	dbcf, err := jurocksdb.OpenCf("testdb", options, cfNames)
+	options := rocksdb.GetDefaultOptions()
+	dbcf, err := rocksdb.Open(testDbPath, options)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
 	}
 	defer dbcf.Close()
 
-	_, err = dbcf.DeleteCf("tab2")
+	_, err = dbcf.DeleteColumnFamily("tab2")
 	if err != nil {
 		fmt.Println(err.Error())
 		return
 	}
 
-	cfList := dbcf.ListCf()
+	cfList := dbcf.ListColumnFamily()
 	fmt.Println(cfList)
 
-	cf := dbcf.GetCf("tab1")
+	cf := dbcf.GetColumnFamily("tab1")
 	key := []byte("hello")
 	//err = cf.Put(key, []byte("world"))
 	//if err != nil {
@@ -207,19 +232,21 @@ func deleteCf() {
 	fmt.Println("value", string(val))
 }
 func addCf() {
-	options := jurocksdb.GetDefaultOptions()
+	options := rocksdb.GetDefaultOptions()
 	cfNames := []string{"tab3"}
-	dbcf, err := jurocksdb.OpenCf("testdb", options, cfNames)
+	dbcf, err := rocksdb.Open(testDbPath, options)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
 	}
 	defer dbcf.Close()
 
-	cfList := dbcf.ListCf()
+	dbcf.AddColumnFamily(cfNames, options)
+
+	cfList := dbcf.ListColumnFamily()
 	fmt.Println(cfList)
 
-	cf := dbcf.GetCf("tab1")
+	cf := dbcf.GetColumnFamily("tab1")
 	key := []byte("hello")
 	//err = cf.Put(key, []byte("world"))
 	//if err != nil {
@@ -232,18 +259,4 @@ func addCf() {
 		return
 	}
 	fmt.Println("value", string(val))
-}
-func SomeTest() {
-	options := jurocksdb.GetDefaultOptions()
-	db, err := jurocksdb.Open("testdb", options)
-	if err != nil {
-		fmt.Println(err.Error())
-		return
-	}
-	defer db.Close()
-
-	db.ListPrefix([]byte("key_4"), func(key, val []byte) bool {
-		fmt.Printf("%s=%s\n", string(key), string(val))
-		return true
-	})
 }

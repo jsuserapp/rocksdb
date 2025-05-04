@@ -1,4 +1,4 @@
-package jurocksdb
+package rocksdb
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/deps/include
@@ -13,226 +13,14 @@ import "C"
 import (
 	"bytes"
 	"errors"
-	"fmt"
-	"github.com/jsuserapp/ju"
-	"sync"
 	"unsafe"
 )
 
 type ColumnFamily struct {
-	db     *RocksDb
+	rocks  *dbType
 	handle *C.rocksdb_column_family_handle_t
 }
-type RocksCf struct {
-	mut    sync.Mutex
-	cfList *ju.OrderMap[string, *ColumnFamily]
-}
 
-func (dbcf *RocksCf) GetCf(name string) *ColumnFamily {
-	dbcf.mut.Lock()
-	defer dbcf.mut.Unlock()
-	cf, _ := dbcf.cfList.Get(name)
-	return cf
-}
-func (dbcf *RocksCf) Close() {
-	dbcf.mut.Lock()
-	defer dbcf.mut.Unlock()
-	var db *RocksDb
-	for _, cf := range dbcf.cfList.Values() {
-		db = cf.db
-		cf.Close()
-	}
-	if db != nil {
-		db.Close()
-	}
-}
-func (dbcf *RocksCf) DeleteCf(name string) (bool, error) {
-	dbcf.mut.Lock()
-	defer dbcf.mut.Unlock()
-	cf, _ := dbcf.cfList.Get(name)
-	if cf == nil {
-		return false, nil
-	}
-	var err *C.char
-	C.rocksdb_drop_column_family(cf.db.db, cf.handle, &err)
-	if err != nil {
-		return false, charErr(err)
-	}
-	dbcf.cfList.Delete(name)
-	cf.Close()
-	return true, nil
-}
-func (dbcf *RocksCf) ListCf() []string {
-	dbcf.mut.Lock()
-	defer dbcf.mut.Unlock()
-	return dbcf.cfList.Keys()
-}
-func uniqNames(names []string) []string {
-	nm := map[string]bool{}
-	for _, name := range names {
-		if name == "" {
-			continue
-		}
-		nm[name] = true
-	}
-	names = make([]string, 0, len(nm))
-	for name := range nm {
-		names = append(names, name)
-	}
-	return names
-}
-func getOptions(options *Options) *C.rocksdb_options_t {
-	if options == nil {
-		options = GetDefaultOptions()
-	}
-	opts := C.rocksdb_options_create()
-	//应用设置
-	applyOptions(opts, options)
-	return opts
-}
-func getExistCfNames(opts *C.rocksdb_options_t, dbPath *C.char) (map[string]bool, error) {
-	var lencf C.size_t
-	var err *C.char
-	existNamesC := C.rocksdb_list_column_families(opts, dbPath, &lencf, &err)
-	if err != nil {
-		return nil, charErr(err)
-	}
-	existNames := map[string]bool{}
-	namesCArr := (*[1 << 30]*C.char)(unsafe.Pointer(existNamesC))[:lencf:lencf]
-	for i := 0; i < int(lencf); i++ {
-		existName := C.GoString(namesCArr[i])
-		existNames[existName] = true
-	}
-	C.rocksdb_list_column_families_destroy(existNamesC, lencf)
-	return existNames, nil
-}
-func openExistCf(opts *C.rocksdb_options_t, dbPath *C.char, existNames map[string]bool, cfList *ju.OrderMap[string, *ColumnFamily]) (*RocksDb, error) {
-	count := len(existNames)
-	names := make([]string, 0, count)
-	for cfName := range existNames {
-		names = append(names, cfName)
-	}
-	//打开 column family
-	cfNamesC := make([]*C.char, count)
-	for i, cfNameC := range names {
-		cfNamesC[i] = C.CString(cfNameC)
-	}
-	defer func() {
-		for _, cfNameC := range cfNamesC {
-			C.free(unsafe.Pointer(cfNameC))
-		}
-	}()
-	cfHandles := make([]*C.rocksdb_column_family_handle_t, count)
-
-	cfOpts := make([]*C.rocksdb_options_t, count)
-	for i := range cfOpts {
-		cfOpts[i] = C.rocksdb_options_create()
-	}
-
-	var err *C.char
-	_db := C.rocksdb_open_column_families(opts, dbPath, C.int(count), &cfNamesC[0], &cfOpts[0], &cfHandles[0], &err)
-	for i := range cfOpts {
-		C.rocksdb_options_destroy(cfOpts[i])
-	}
-	if err != nil {
-		fmt.Println(_db, cfHandles[0])
-		return nil, charErr(err)
-	}
-	db := RocksDb{db: _db}
-	for i, name := range names {
-		cfList.Set(name, &ColumnFamily{
-			db:     &db,
-			handle: cfHandles[i],
-		})
-	}
-	return &db, nil
-}
-func createCf(db *RocksDb, opts *C.rocksdb_options_t, createNames []string, cfList *ju.OrderMap[string, *ColumnFamily]) error {
-	createCount := len(createNames)
-	if createCount == 0 {
-		return nil
-	}
-	createNamesC := make([]*C.char, createCount)
-	for i, createName := range createNames {
-		createNamesC[i] = C.CString(createName)
-	}
-	//一旦赋值后就需要清理
-	defer func() {
-		for _, createNameC := range createNamesC {
-			C.free(unsafe.Pointer(createNameC))
-		}
-	}()
-
-	//生成需要的 column family
-	var err *C.char
-	var lencfs C.size_t
-	handleList := C.rocksdb_create_column_families(db.db, opts, C.int(createCount), &createNamesC[0], &lencfs, &err)
-	if err != nil {
-		return charErr(err)
-	}
-	handleArray := (*[1 << 30]*C.rocksdb_column_family_handle_t)(unsafe.Pointer(handleList))[:lencfs:lencfs]
-	handles := make([]*C.rocksdb_column_family_handle_t, lencfs)
-	copy(handles, handleArray)
-	C.free(unsafe.Pointer(handleList))
-	for i := 0; i < int(lencfs); i++ {
-		cfList.Set(createNames[i], &ColumnFamily{
-			db:     db,
-			handle: handles[i],
-		})
-	}
-	return nil
-}
-func initDb(db *RocksDb, options *Options) {
-	db.wo = C.rocksdb_writeoptions_create()
-	if options.DisableWAL {
-		C.rocksdb_writeoptions_disable_WAL(db.wo, C.int(boolToInt(options.DisableWAL)))
-	}
-	db.ro = C.rocksdb_readoptions_create()
-	C.rocksdb_readoptions_set_prefix_same_as_start(db.ro, 1)
-}
-func OpenCf(path string, options *Options, addNames []string) (*RocksCf, error) {
-	cfs := ju.NewOrderMap[string, *ColumnFamily]()
-	dbcf := &RocksCf{cfList: cfs}
-	//如果用户没有传入 options 使用缺省设置
-	opts := getOptions(options)
-	//数据库路径，这个参数多次使用
-	dbPath := C.CString(path)
-	defer func() {
-		C.free(unsafe.Pointer(dbPath))
-		C.rocksdb_options_destroy(opts)
-	}()
-	//获取已经存在的 column family
-	existNames, e := getExistCfNames(opts, dbPath)
-	if e != nil {
-		return nil, e
-	}
-	for existName := range existNames {
-		dbcf.cfList.Set(existName, nil)
-	}
-	db, e := openExistCf(opts, dbPath, existNames, dbcf.cfList)
-	if e != nil {
-		return nil, e
-	}
-	initDb(db, options)
-
-	//检测名称的有效性和去重
-	addNames = uniqNames(addNames)
-	if len(addNames) > 0 {
-		var createNames []string
-		for _, name := range addNames {
-			_, ok := dbcf.cfList.Get(name)
-			if !ok {
-				createNames = append(createNames, name)
-			}
-		}
-		//生成不存在的 column family
-		e = createCf(db, opts, createNames, dbcf.cfList)
-		if e != nil {
-			return nil, e
-		}
-	}
-	return dbcf, nil
-}
 func (cf *ColumnFamily) Close() {
 	if cf.handle != nil {
 		C.rocksdb_column_family_handle_destroy(cf.handle)
@@ -243,14 +31,14 @@ func (cf *ColumnFamily) Put(key, value []byte) error {
 	var err *C.char
 	cKey, keyLen := toCBytes(key)
 	cValue, valLen := toCBytes(value)
-	C.rocksdb_put_cf(cf.db.db, cf.db.wo, cf.handle, cKey, keyLen, cValue, valLen, &err)
+	C.rocksdb_put_cf(cf.rocks.db, cf.rocks.wo, cf.handle, cKey, keyLen, cValue, valLen, &err)
 	return charErr(err)
 }
 func (cf *ColumnFamily) Get(key []byte) ([]byte, error) {
 	cKey, keyLen := toCBytes(key)
 	var err *C.char
 	var valLen C.size_t
-	value := C.rocksdb_get_cf(cf.db.db, cf.db.ro, cf.handle, cKey, keyLen, &valLen, &err)
+	value := C.rocksdb_get_cf(cf.rocks.db, cf.rocks.ro, cf.handle, cKey, keyLen, &valLen, &err)
 	if err != nil {
 		return nil, charErr(err)
 	}
@@ -267,7 +55,7 @@ func (cf *ColumnFamily) Get(key []byte) ([]byte, error) {
 func (cf *ColumnFamily) Delete(key []byte) error {
 	cKey, keyLen := toCBytes(key)
 	var err *C.char
-	C.rocksdb_delete_cf(cf.db.db, cf.db.wo, cf.handle, cKey, keyLen, &err)
+	C.rocksdb_delete_cf(cf.rocks.db, cf.rocks.wo, cf.handle, cKey, keyLen, &err)
 	return charErr(err)
 }
 
@@ -291,7 +79,7 @@ func (cf *ColumnFamily) PutBatch(keys, values [][]byte) error {
 	}
 
 	var err *C.char
-	C.rocksdb_write(cf.db.db, cf.db.wo, wb, &err)
+	C.rocksdb_write(cf.rocks.db, cf.rocks.wo, wb, &err)
 	return charErr(err)
 }
 func (cf *ColumnFamily) DeleteBatch(keys [][]byte) error {
@@ -305,7 +93,19 @@ func (cf *ColumnFamily) DeleteBatch(keys [][]byte) error {
 		C.rocksdb_writebatch_delete_cf(wb, cf.handle, cKey, keyLen)
 	}
 	var err *C.char
-	C.rocksdb_write(cf.db.db, cf.db.wo, wb, &err)
+	C.rocksdb_write(cf.rocks.db, cf.rocks.wo, wb, &err)
+	return charErr(err)
+}
+
+// DeleteRange 这个函数是枚举然后单独删除数据的代替版
+// start 和 end 可以传 nil，但是都是 nil 的时候不会匹配任何键，所以不会删除任何数据
+// nil 和 0 字节的有效指针效果是一样的，函数删除时匹配 start，但是不匹配 end，也就是和
+// start 相同的键会被删除，但是和 end 相同的键会被保留，只删除 end 之前的键。
+func (cf *ColumnFamily) DeleteRange(start, end []byte) error {
+	cStart, startLen := toCBytes(start)
+	cEnd, endLen := toCBytes(end)
+	var err *C.char
+	C.rocksdb_delete_range_cf(cf.rocks.db, cf.rocks.wo, cf.handle, cStart, startLen, cEnd, endLen, &err)
 	return charErr(err)
 }
 
@@ -357,7 +157,7 @@ func (cf *ColumnFamily) GetMulti(keys [][]byte, cb func(key, val []byte)) error 
 		errPtrs[i] = nil
 	}
 
-	C.rocksdb_multi_get_cf(cf.db.db, cf.db.ro, cCFs, C.size_t(numKey), cKeys, cKeyLens, values, valueLens, &errs)
+	C.rocksdb_multi_get_cf(cf.rocks.db, cf.rocks.ro, cCFs, C.size_t(numKey), cKeys, cKeyLens, values, valueLens, &errs)
 
 	var err error
 	for i := range keys {
@@ -374,7 +174,7 @@ func (cf *ColumnFamily) GetMulti(keys [][]byte, cb func(key, val []byte)) error 
 	return err
 }
 func (cf *ColumnFamily) DeletePrefix(prefix []byte) (int, error) {
-	iter := C.rocksdb_create_iterator_cf(cf.db.db, cf.db.ro, cf.handle)
+	iter := C.rocksdb_create_iterator_cf(cf.rocks.db, cf.rocks.ro, cf.handle)
 	defer C.rocksdb_iter_destroy(iter)
 	cPrefix, pfLen := toCBytes(prefix)
 	if pfLen == 0 {
@@ -401,7 +201,7 @@ func (cf *ColumnFamily) DeletePrefix(prefix []byte) (int, error) {
 	}
 
 	var err *C.char
-	C.rocksdb_write(cf.db.db, cf.db.wo, wb, &err)
+	C.rocksdb_write(cf.rocks.db, cf.rocks.wo, wb, &err)
 	return count, charErr(err)
 }
 
@@ -410,7 +210,7 @@ func (cf *ColumnFamily) ListPrefix(prefix []byte, cb func(key, val []byte) bool)
 	if cb == nil {
 		return
 	}
-	iter := C.rocksdb_create_iterator_cf(cf.db.db, cf.db.ro, cf.handle)
+	iter := C.rocksdb_create_iterator_cf(cf.rocks.db, cf.rocks.ro, cf.handle)
 	defer C.rocksdb_iter_destroy(iter)
 	cPrefix, pfLen := toCBytes(prefix)
 	if pfLen == 0 {
@@ -447,7 +247,7 @@ func (cf *ColumnFamily) ListRange(start, end []byte, cb func(key, val []byte) bo
 	if cb == nil {
 		return
 	}
-	iter := C.rocksdb_create_iterator_cf(cf.db.db, cf.db.ro, cf.handle)
+	iter := C.rocksdb_create_iterator_cf(cf.rocks.db, cf.rocks.ro, cf.handle)
 	defer C.rocksdb_iter_destroy(iter)
 	cPrefix, pfLen := toCBytes(start)
 	if pfLen == 0 {
